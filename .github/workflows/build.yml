@@ -1,0 +1,57 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:        # 支持在 Actions 页面手动触发
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    container:
+      image: kivy/buildozer:latest   # 官方 buildozer 环境镜像
+      options: --user root           # 容器内以 root 运行，避免权限问题
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 清理可能残留的空 SDK 目录（此前 mkdir 会导致 buildozer 误判 SDK 已安装
+      # 而跳过 sdkmanager 下载，报 "sdkmanager is not installed"）。
+      # 删除后 buildozer 会完整下载 SDK（含 tools/bin/sdkmanager）。
+      - name: Reset incomplete Android SDK
+        run: |
+          rm -rf "$HOME/.buildozer/android/platform/android-sdk" \
+                 "$HOME/.buildozer/android/platform/android-ndk-*"
+
+      # 第一遍：让 buildozer 完整下载 Android SDK/NDK。
+      # 此时许可证未接受，构建会在 aidl 阶段失败——正常，忽略即可。
+      # 不能提前 mkdir SDK 目录，否则 buildozer 会误判 SDK 已安装而跳过下载 sdkmanager。
+      - name: Initialize Android SDK (first pass)
+        run: buildozer -v android debug || true
+
+      # SDK 就位后接受 Android SDK 许可证（sdkmanager 此时已存在），
+      # 确保后续 build-tools 能正常安装，修复 "Aidl not found"。
+      - name: Accept Android SDK licenses
+        run: |
+          SDKROOT="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$SDKROOT/licenses"
+          printf '24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n' > "$SDKROOT/licenses/android-sdk-license"
+          yes | "$SDKROOT/tools/bin/sdkmanager" --sdk_root="$SDKROOT" --licenses >/dev/null 2>&1 || true
+
+      # 清理第一遍构建残留的 p4a build venv（可能含损坏的混合 pip，
+      # 导致 ImportError: BuildDependencyInstallError）。
+      # 保留编译产物，只删 venv，构建速度几乎不受影响。
+      - name: Clean stale p4a build venv
+        run: |
+          rm -rf "$HOME/.buildozer/android/platform"/build-*/venv || true
+
+      # 正式构建：SDK/NDK 已缓存，许可证已接受，从 build-tools 安装阶段继续
+      - name: Build APK (debug)
+        run: buildozer -v android debug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lan-server-apk
+          path: bin/*.apk
+          if-no-files-found: error
